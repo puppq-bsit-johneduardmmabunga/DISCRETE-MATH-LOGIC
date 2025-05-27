@@ -1,0 +1,571 @@
+#SWIFT
+
+import random
+import copy
+
+class Game2048Logic:
+    """
+    Implements the core logic for a 2048-like game.
+    Handles board state, tile generation, movement, merging,
+    and win/loss conditions. This version supports:
+    - Classic Mode: Reach a target tile.
+    - Adventure Mode: Limited moves, collect specific tiles.
+    - Swift Mode: Time limit, reach a target tile.
+    Also includes high score tracking and undo functionality.
+    """
+
+    # Define a maximum history size for undo to prevent excessive memory usage
+    MAX_HISTORY_SIZE = 10 
+
+    def __init__(self, size=4, target_tile=2048, max_moves=None, collect_targets=None, time_limit=None):
+        """
+        Initializes the game board and state.
+
+        Args:
+            size (int): The dimension of the square board (e.g., 4 for a 4x4 board).
+            target_tile (int): The tile value to reach to win the game (classic win condition).
+            max_moves (int, optional): For 'Adventure' mode. The maximum number of moves allowed. None for unlimited.
+            collect_targets (dict, optional): For 'Adventure' mode. A dictionary of {tile_value: quantity_to_collect}.
+                                              e.g., {2: 4, 4: 2} means collect four '2's and two '4's.
+            time_limit (int, optional): For 'Swift' mode. The initial time limit in arbitrary units (e.g., seconds). None for no time limit.
+        """
+        self.size = size
+        self.target_tile = target_tile
+        self.board = [[0] * size for _ in range(size)]
+        self.score = 0
+        self.high_score = 0 # Initialize high score for the current session
+        self.game_over = False
+        self.won = False
+
+        # Mode-specific parameters
+        self.max_moves = max_moves
+        self.time_limit = time_limit 
+        self.collect_targets = collect_targets if collect_targets is not None else {}
+
+        # Mode-specific state
+        self.current_moves = self.max_moves if self.max_moves is not None else 0
+        self.time_remaining = self.time_limit if self.time_limit is not None else 0
+        self.collected_tiles = {tile: 0 for tile in self.collect_targets.keys()}
+
+        # History for undo functionality: stores (board_state, score, collected_tiles, current_moves, time_remaining) tuples
+        self._board_history = [] 
+
+        # Add initial tiles to the board and save the initial state
+        self._add_random_tile() 
+        self._add_random_tile()
+        self._save_board_state() # Save the initial board state
+
+    def _save_board_state(self):
+        """
+        Saves the current board state, score, collected tiles, current moves, and time remaining
+        to the history for undo functionality.
+        Limits the history size to prevent excessive memory usage.
+        """
+        # Store a deep copy of the board and the current score, collected tiles, moves, and time
+        current_state = (copy.deepcopy(self.board), self.score, 
+                         copy.deepcopy(self.collected_tiles), self.current_moves, self.time_remaining)
+        self._board_history.append(current_state)
+        # Keep history size limited
+        if len(self._board_history) > self.MAX_HISTORY_SIZE:
+            self._board_history.pop(0) # Remove the oldest state
+
+    def undo_move(self):
+        """
+        Reverts the game board, score, collected tiles, current moves, and time remaining
+        to the previous state.
+        Returns True if undo was successful, False otherwise (e.g., no history).
+        """
+        if len(self._board_history) > 1: # Need at least two states to undo (current + previous)
+            # Pop the current state (which was just saved after the last successful move)
+            self._board_history.pop() 
+            # Load the previous state
+            previous_board, previous_score, previous_collected_tiles, previous_moves, previous_time_remaining = self._board_history[-1]
+            
+            self.board = copy.deepcopy(previous_board)
+            self.score = previous_score
+            self.collected_tiles = copy.deepcopy(previous_collected_tiles)
+            self.current_moves = previous_moves
+            self.time_remaining = previous_time_remaining
+            
+            self.game_over = False # Undo implies game is no longer over (unless it was the very first state)
+            self.won = False # Undo implies game is no longer won
+            print("Undo successful.")
+            return True
+        else:
+            print("Cannot undo: No previous states available.")
+            return False
+
+    def _add_random_tile(self):
+        """
+        Adds a new tile (2 or 4) to a random empty spot on the board.
+        A 2 is generated 90% of the time, a 4 is generated 10% of the time.
+        Also updates collected_tiles if the generated tile is one of the targets.
+        """
+        empty_cells = []
+        for r in range(self.size):
+            for c in range(self.size):
+                if self.board[r][c] == 0:
+                    empty_cells.append((r, c))
+
+        if empty_cells:
+            # Choose a random empty cell
+            r, c = random.choice(empty_cells)
+            # 90% chance for 2, 10% chance for 4
+            new_tile_value = 2 if random.random() < 0.9 else 4
+            self.board[r][c] = new_tile_value
+
+            # Update collected tiles if this newly generated tile is a target
+            if new_tile_value in self.collect_targets:
+                if self.collected_tiles[new_tile_value] < self.collect_targets[new_tile_value]:
+                    self.collected_tiles[new_tile_value] += 1
+            return True # A tile was successfully added
+        return False # No empty cells to add a tile
+
+    def _compress_row(self, row):
+        """
+        Compresses a row by moving all non-zero tiles to the beginning.
+        Example: [0, 2, 0, 4] -> [2, 4, 0, 0]
+        """
+        new_row = [tile for tile in row if tile != 0]
+        # Pad with zeros to the original length
+        new_row.extend([0] * (self.size - len(new_row)))
+        return new_row
+
+    def _merge_row(self, row):
+        """
+        Merges identical adjacent tiles in a compressed row.
+        Updates the score and collected_tiles if a new target tile is formed by merging.
+        Example: [2, 2, 4, 0] -> [4, 0, 4, 0] (score increases)
+        """
+        merged_row = list(row) # Create a mutable copy to modify
+        for i in range(self.size - 1):
+            # Check if the current tile is non-zero and matches the next tile
+            if merged_row[i] != 0 and merged_row[i] == merged_row[i+1]:
+                merged_tile_value = merged_row[i] * 2 # Double the value
+                self.score += merged_tile_value # Add to score
+                merged_row[i] = merged_tile_value # Update the current tile
+                merged_row[i+1] = 0 # Clear the merged tile
+
+                # Update collected tiles if this newly formed tile (from merge) is a target
+                if merged_tile_value in self.collect_targets:
+                    if self.collected_tiles[merged_tile_value] < self.collect_targets[merged_tile_value]:
+                        self.collected_tiles[merged_tile_value] += 1
+        return merged_row
+
+    def _process_row(self, row):
+        """
+        Applies compression and merging logic to a single row/column segment.
+        Returns the new row/column segment and a boolean indicating if any changes occurred.
+        """
+        original_row = list(row) # Copy for comparison to detect changes
+        
+        # 1. Compress non-zero tiles to one side
+        compressed = self._compress_row(original_row)
+        
+        # 2. Merge identical adjacent tiles
+        merged = self._merge_row(compressed)
+        
+        # 3. Re-compress after merge (important for cases like [2, 2, 4, 4] -> [4, 0, 8, 0] -> [4, 8, 0, 0])
+        final_row = self._compress_row(merged)
+        
+        # Check if the row changed from its original state after all operations
+        changed = (original_row != final_row)
+        return final_row, changed
+
+    def _transpose(self):
+        """
+        Transposes the board (rows become columns and vice-versa).
+        This is a common matrix operation used to simplify movement logic.
+        """
+        self.board = [list(col) for col in zip(*self.board)]
+
+    def _reverse_rows(self):
+        """
+        Reverses each row of the board.
+        Used to adapt 'left' movement logic for 'right' and 'down' moves.
+        """
+        for r in range(self.size):
+            self.board[r].reverse()
+
+    def move(self, direction):
+        """
+        Performs a move based on the given direction ('up', 'down', 'left', or 'right').
+        Updates the board, score, moves/time counter, and checks game status.
+
+        Args:
+            direction (str): The direction of the move.
+
+        Returns:
+            bool: True if the move was valid and resulted in a change on the board, False otherwise.
+        """
+        if self.game_over or self.won:
+            return False # No moves allowed if game is already over or won
+
+        board_changed = False # Flag to track if any tiles moved or merged
+        
+        # Apply movement logic based on direction
+        if direction == 'left':
+            for r in range(self.size):
+                new_row, changed = self._process_row(self.board[r])
+                if changed:
+                    self.board[r] = new_row
+                    board_changed = True
+        elif direction == 'right':
+            self._reverse_rows() # Reverse rows to apply left logic
+            for r in range(self.size):
+                new_row, changed = self._process_row(self.board[r])
+                if changed:
+                    self.board[r] = new_row
+                    board_changed = True
+            self._reverse_rows() # Reverse rows back to original orientation
+        elif direction == 'up':
+            self._transpose() # Transpose to treat columns as rows
+            for r in range(self.size): # Now iterating through original columns
+                new_col, changed = self._process_row(self.board[r])
+                if changed:
+                    self.board[r] = new_col
+                    board_changed = True
+            self._transpose() # Transpose board back to original orientation
+        elif direction == 'down':
+            self._transpose() # Transpose
+            self._reverse_rows() # Reverse transposed rows
+            for r in range(self.size):
+                new_col, changed = self._process_row(self.board[r])
+                if changed:
+                    self.board[r] = new_col
+                    board_changed = True
+            self._reverse_rows() # Reverse transposed rows back
+            self._transpose() # Transpose board back to original orientation
+
+        # If the board state actually changed after the move attempt:
+        if board_changed:
+            self._add_random_tile() # Add a new tile (which also updates collected_tiles)
+            
+            # Decrement appropriate counter based on mode
+            if self.max_moves is not None:
+                self.current_moves -= 1 # Decrement move counter for Adventure mode
+            if self.time_limit is not None:
+                self.time_remaining -= 1 # Decrement time for Swift mode (simulating 1 unit of time per move)
+
+            self._check_game_status() # Re-evaluate game state (win/loss)
+            self._save_board_state() # Save the new state after a successful move
+            return True # Indicate that a valid, board-changing move occurred
+        else:
+            # If no tiles moved or merged (board_changed is False), check for immediate game over.
+            # This handles cases where a move was attempted but no changes could happen.
+            if not self._can_make_move():
+                self.game_over = True # Game over because no moves are possible on the board
+            # Also check if moves/time ran out and no win condition was met
+            elif (self.max_moves is not None and self.current_moves <= 0 and not self.has_won() and not self._all_targets_collected()) or \
+                 (self.time_limit is not None and self.time_remaining <= 0 and not self.has_won() and not self._all_targets_collected()):
+                self.game_over = True
+            return False # Indicate no change occurred
+
+    def _all_targets_collected(self):
+        """
+        Checks if all specified tile collection targets have been met.
+        """
+        if not self.collect_targets: # If no collect targets are defined, this condition is not applicable
+            return False 
+        
+        for tile_value, required_quantity in self.collect_targets.items():
+            # Check if the collected quantity for any target is less than required
+            if self.collected_tiles.get(tile_value, 0) < required_quantity:
+                return False # Not all targets collected yet
+        return True # All targets have been collected
+
+    def _check_game_status(self):
+        """
+        Checks for win and game over conditions after each move.
+        This method updates the `self.won` and `self.game_over` flags.
+        It also updates the high score.
+        """
+        # Update high score
+        if self.score > self.high_score:
+            self.high_score = self.score
+
+        # Check for win condition first:
+        # Player wins if target_tile is reached OR if all collect targets are met
+        for r in range(self.size):
+            for c in range(self.size):
+                if self.board[r][c] == self.target_tile:
+                    self.won = True # Classic/Swift win condition
+                    break
+            if self.won:
+                break
+        
+        if self._all_targets_collected():
+            self.won = True # Adventure win condition
+
+        # If won, the game is over
+        if self.won:
+            self.game_over = True
+            return
+
+        # Check for game over condition if not already won:
+        # Game is over if no more moves are possible on the board
+        # OR if max_moves is reached (Adventure)
+        # OR if time_limit is reached (Swift)
+        if (not self._can_make_move() and not self.won) or \
+           (self.max_moves is not None and self.current_moves <= 0 and not self.won) or \
+           (self.time_limit is not None and self.time_remaining <= 0 and not self.won):
+            self.game_over = True
+
+
+    def _can_make_move(self):
+        """
+        Checks if any valid move (slide or merge) is possible on the current board.
+        This is used to determine if the game is truly stuck.
+        """
+        # 1. Check for empty cells: If there's any 0, a new tile can be placed, and moves are possible.
+        for r in range(self.size):
+            for c in range(self.size):
+                if self.board[r][c] == 0:
+                    return True 
+
+        # 2. Check for possible merges: If no empty cells, check if any adjacent tiles can merge.
+        # To do this without altering the actual board, we create a temporary game state.
+        temp_game = copy.deepcopy(self)
+        # Reset score/counters in temp_game as we only care if a *change* is possible
+        temp_game.score = 0 
+        temp_game.current_moves = self.current_moves # Preserve moves for simulation
+        temp_game.time_remaining = self.time_remaining # Preserve time for simulation
+        temp_game.collected_tiles = copy.deepcopy(self.collected_tiles) # Preserve collected tiles
+        temp_game._board_history = [] # Clear history for simulation to avoid infinite recursion/memory issues
+
+        # Temporarily disable mode-specific game over conditions in the simulated game
+        # so that the simulated move logic doesn't prematurely trigger game over by moves/time
+        temp_game.max_moves = None 
+        temp_game.time_limit = None 
+
+        # Attempt to make a move in each direction on the temporary board
+        # If any of these simulated moves results in a board change, then a move is possible.
+        if temp_game.move('left') or \
+           temp_game.move('right') or \
+           temp_game.move('up') or \
+           temp_game.move('down'):
+            return True # A simulated move changed the board, so a move is possible in the real game
+
+        return False # No empty cells and no possible merges, so game is stuck
+
+    # --- Public Getter Methods ---
+    def get_board(self):
+        """
+        Returns the current state of the board.
+        """
+        return self.board
+
+    def get_score(self):
+        """
+        Returns the current score.
+        """
+        return self.score
+
+    def get_high_score(self):
+        """
+        Returns the highest score achieved in the current session.
+        """
+        return self.high_score
+
+    def is_game_over(self):
+        """
+        Returns True if the game is over, False otherwise.
+        """
+        return self.game_over
+
+    def has_won(self):
+        """
+        Returns True if the player has reached the target tile or collected all targets, False otherwise.
+        """
+        return self.won
+
+    def get_max_moves(self):
+        """
+        Returns the maximum number of moves allowed in this game (for Adventure mode).
+        """
+        return self.max_moves
+
+    def get_current_moves(self):
+        """
+        Returns the remaining number of moves (for Adventure mode).
+        """
+        return self.current_moves
+
+    def get_time_limit(self):
+        """
+        Returns the initial time limit for the game (for Swift mode).
+        """
+        return self.time_limit
+
+    def get_time_remaining(self):
+        """
+        Returns the remaining time (for Swift mode).
+        """
+        return self.time_remaining
+
+    def get_collect_targets(self):
+        """
+        Returns the dictionary of tile collection targets set for this game (for Adventure mode).
+        """
+        return self.collect_targets
+
+    def get_collected_tiles(self):
+        """
+        Returns the dictionary of currently collected tiles and their counts (for Adventure mode).
+        """
+        return self.collected_tiles
+
+    def reset_game(self):
+        """
+        Resets the game to its initial state, clearing the board, score,
+        and resetting move/time and collection counters.
+        The high score is preserved across resets within the same object instance.
+        """
+        self.board = [[0] * self.size for _ in range(self.size)]
+        self.score = 0
+        self.game_over = False
+        self.won = False
+        
+        # Reset counters based on initial settings
+        self.current_moves = self.max_moves if self.max_moves is not None else 0
+        self.time_remaining = self.time_limit if self.time_limit is not None else 0
+        self.collected_tiles = {tile: 0 for tile in self.collect_targets.keys()}
+        
+        self._board_history = [] # Clear history for a new game
+        self._add_random_tile()
+        self._add_random_tile()
+        self._save_board_state() # Save the initial state of the new game
+
+# Example Usage (for testing the logic):
+if __name__ == "__main__":
+    print("--- Swift Mode Game Example (Time Limit) ---")
+    # Swift Mode: Target 64, initial time limit 15 units (e.g., 15 moves)
+    game_swift = Game2048Logic(size=4, target_tile=64, time_limit=15)
+
+    print("Initial Board (Swift Mode):")
+    for row in game_swift.get_board():
+        print(row)
+    print(f"Score: {game_swift.get_score()}")
+    print(f"High Score: {game_swift.get_high_score()}")
+    print(f"Time Remaining: {game_swift.get_time_remaining()}")
+    print("-" * 20)
+
+    moves_options = ['left', 'up', 'right', 'down']
+    move_iteration_count = 0
+    
+    # Simulate moves for Swift Mode
+    while not game_swift.is_game_over() and not game_swift.has_won() and move_iteration_count < 20: 
+        
+        if move_iteration_count == 3: # Test undo in Swift Mode
+            print("--- Attempting UNDO in Swift Mode ---")
+            game_swift.undo_move()
+            print("Board after UNDO:")
+            for row in game_swift.get_board():
+                print(row)
+            print(f"Score: {game_swift.get_score()}")
+            print(f"Time Remaining: {game_swift.get_time_remaining()}")
+            print("-" * 20)
+
+        chosen_move = random.choice(moves_options)
+        print(f"Attempting move: {chosen_move}")
+        moved = game_swift.move(chosen_move) # Execute the move
+        
+        print("Current Board (Swift Mode):")
+        for row in game_swift.get_board():
+            print(row)
+        print(f"Score: {game_swift.get_score()}")
+        print(f"High Score: {game_swift.get_high_score()}")
+        print(f"Time Remaining: {game_swift.get_time_remaining()}")
+        print(f"Board changed: {moved}") 
+        print(f"Game Over: {game_swift.is_game_over()}, Won: {game_swift.has_won()}")
+        print("-" * 20)
+        move_iteration_count += 1
+
+    if game_swift.has_won():
+        print("Congratulations! You won Swift Mode!")
+    elif game_swift.is_game_over():
+        print("Game Over in Swift Mode!")
+        if game_swift.get_time_remaining() <= 0 and not game_swift.has_won():
+            print("You ran out of time!")
+        else:
+            print("No more moves possible on the board.")
+    else:
+        print("Swift Game still in progress after test moves.")
+
+
+    print("\n--- Adventure Mode Game Example (Moves Limit & Collect Targets) ---")
+    # Adventure Mode: Collect four '2's and two '4's, with a limit of 10 moves
+    game_adventure = Game2048Logic(size=4, target_tile=2048, max_moves=10, collect_targets={2: 4, 4: 2})
+
+    print("Initial Board (Adventure Mode):")
+    for row in game_adventure.get_board():
+        print(row)
+    print(f"Score: {game_adventure.get_score()}")
+    print(f"High Score: {game_adventure.get_high_score()}")
+    print(f"Moves Left: {game_adventure.get_current_moves()}")
+    print(f"Collect Targets: {game_adventure.get_collect_targets()}")
+    print(f"Collected Tiles: {game_adventure.get_collected_tiles()}")
+    print("-" * 20)
+
+    move_iteration_count = 0
+    while not game_adventure.is_game_over() and not game_adventure.has_won() and move_iteration_count < 15: 
+        chosen_move = random.choice(moves_options)
+        print(f"Attempting move: {chosen_move}")
+        moved = game_adventure.move(chosen_move)
+        
+        print("Current Board (Adventure Mode):")
+        for row in game_adventure.get_board():
+            print(row)
+        print(f"Score: {game_adventure.get_score()}")
+        print(f"High Score: {game_adventure.get_high_score()}")
+        print(f"Moves Left: {game_adventure.get_current_moves()}")
+        print(f"Collected Tiles: {game_adventure.get_collected_tiles()}")
+        print(f"Board changed: {moved}")
+        print(f"Game Over: {game_adventure.is_game_over()}, Won: {game_adventure.has_won()}")
+        print("-" * 20)
+        move_iteration_count += 1
+
+    if game_adventure.has_won():
+        print("Congratulations! You won the Adventure Mode!")
+    elif game_adventure.is_game_over():
+        print("Game Over in Adventure Mode!")
+        if game_adventure.get_current_moves() <= 0 and not game_adventure.has_won():
+            print("You ran out of moves!")
+        else:
+            print("No more moves possible on the board.")
+    else:
+        print("Adventure Game still in progress after test moves.")
+
+    print("\n--- Classic Mode Game Example (Target Tile Only) ---")
+    game_classic = Game2048Logic(size=4, target_tile=64) 
+
+    print("Initial Board (Classic Mode):")
+    for row in game_classic.get_board():
+        print(row)
+    print(f"Score: {game_classic.get_score()}")
+    print(f"High Score: {game_classic.get_high_score()}")
+    print("-" * 20)
+
+    for i in range(10): 
+        if game_classic.is_game_over() or game_classic.has_won():
+            break
+        
+        chosen_move = random.choice(moves_options)
+        print(f"Attempting move: {chosen_move}")
+        moved = game_classic.move(chosen_move)
+        
+        print("Current Board (Classic Mode):")
+        for row in game_classic.get_board():
+            print(row)
+        print(f"Score: {game_classic.get_score()}")
+        print(f"High Score: {game_classic.get_high_score()}")
+        print(f"Board changed: {moved}")
+        print(f"Game Over: {game_classic.is_game_over()}, Won: {game_classic.has_won()}")
+        print("-" * 20)
+
+    if game_classic.has_won():
+        print("Congratulations! You won the Classic Mode!")
+    elif game_classic.is_game_over():
+        print("Game Over in Classic Mode! No more moves.")
+    else:
+        print("Classic Game still in progress.")
